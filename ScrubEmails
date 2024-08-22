@@ -1,0 +1,179 @@
+'before running
+'check @XXXXX.com is default excluded domain
+'check filePath = "C:\Working\" is desired Excel save folder
+
+Sub ScrubEmailAddresses()
+    Dim olApp As Outlook.Application
+    Dim olNamespace As Outlook.Namespace
+    Dim olInbox As Outlook.Folder
+    Dim olSent As Outlook.Folder
+    Dim olCalendar As Outlook.Folder
+    Dim olMail As Outlook.MailItem
+    Dim olMeeting As Outlook.AppointmentItem
+    Dim olItems As Outlook.Items
+    Dim itm As Object
+    Dim i As Long
+    Dim email As String
+    Dim dateThresholdStart As Date
+    Dim dateThresholdEnd As Date
+    Dim uniqueEmails As Object
+    Dim excelApp As Object
+    Dim workbook As Object
+    Dim sheet As Object
+    Dim filePath As String
+    Dim savePath As String
+    Dim nowDate As String
+    Dim excludeDomains As String
+    Dim domainsArray() As String
+    
+    ' Initialize
+    Set olApp = Outlook.Application
+    Set olNamespace = olApp.GetNamespace("MAPI")
+    Set olInbox = olNamespace.GetDefaultFolder(olFolderInbox)
+    Set olSent = olNamespace.GetDefaultFolder(olFolderSentMail)
+    Set olCalendar = olNamespace.GetDefaultFolder(olFolderCalendar)
+    Set uniqueEmails = CreateObject("Scripting.Dictionary")
+    
+    ' Ask user for date range
+    Dim dateRangeInput As String
+    dateRangeInput = InputBox("Enter the start date and end date (MM/DD/YYYY - MM/DD/YYYY):", "Date Range")
+    If dateRangeInput = "" Then Exit Sub
+    Dim dates() As String
+    dates = Split(dateRangeInput, "-")
+    If UBound(dates) <> 1 Then
+        MsgBox "Invalid date range format. Please use MM/DD/YYYY - MM/DD/YYYY", vbExclamation
+        Exit Sub
+    End If
+    dateThresholdStart = CDate(Trim(dates(0)))
+    dateThresholdEnd = CDate(Trim(dates(1)))
+    
+    ' Ask user for exclusion criteria
+    excludeDomains = InputBox("Enter the domain(s) to exclude, separated by commas, or leave blank to include all domains (default: *@XXXXX.com):", "Exclude Domains", "@XXXXX.com")
+    If excludeDomains = "" Then
+        domainsArray = Split("", ",")
+    Else
+        domainsArray = Split(excludeDomains, ",")
+    End If
+    
+    ' Prepare Excel
+    Set excelApp = CreateObject("Excel.Application")
+    Set workbook = excelApp.Workbooks.Add
+    Set sheet = workbook.Sheets(1)
+    sheet.Name = "New Contacts"
+    sheet.Cells(1, 1).Value = "Inbox"
+    sheet.Cells(1, 2).Value = "Sent"
+    sheet.Cells(1, 3).Value = "Calendar"
+    
+    ' Scrub Inbox
+    Set olItems = olInbox.Items
+    olItems.Sort "[ReceivedTime]", True
+    i = 2
+    For Each itm In olItems
+        If TypeOf itm Is Outlook.MailItem Then
+            Set olMail = itm
+            If olMail.ReceivedTime >= dateThresholdStart And olMail.ReceivedTime <= dateThresholdEnd Then
+                ' Extract From, To, CC
+                AddUniqueEmail uniqueEmails, sheet, olMail.SenderEmailAddress, 1, i, domainsArray
+                ExtractRecipients olMail, uniqueEmails, sheet, 1, i, domainsArray
+            End If
+        End If
+    Next itm
+    
+    ' Scrub Sent Items
+    Set olItems = olSent.Items
+    olItems.Sort "[SentOn]", True
+    i = 2
+    For Each itm In olItems
+        If TypeOf itm Is Outlook.MailItem Then
+            Set olMail = itm
+            If olMail.SentOn >= dateThresholdStart And olMail.SentOn <= dateThresholdEnd Then
+                ' Extract From, To, CC
+                AddUniqueEmail uniqueEmails, sheet, olMail.SenderEmailAddress, 2, i, domainsArray
+                ExtractRecipients olMail, uniqueEmails, sheet, 2, i, domainsArray
+            End If
+        End If
+    Next itm
+    
+    ' Scrub Calendar
+    Set olItems = olCalendar.Items
+    olItems.Sort "[Start]", True
+    olItems.IncludeRecurrences = False
+    i = 2
+    For Each itm In olItems
+        If TypeOf itm Is Outlook.AppointmentItem Then
+            Set olMeeting = itm
+            If olMeeting.Start >= dateThresholdStart And olMeeting.Start <= dateThresholdEnd And olMeeting.MeetingStatus = olMeetingAccepted Then
+                ' Extract Organizer
+                AddUniqueEmail uniqueEmails, sheet, olMeeting.Organizer, 3, i, domainsArray
+                ' Extract Attendees
+                ExtractAttendees olMeeting, uniqueEmails, sheet, 3, i, domainsArray
+            End If
+        End If
+    Next itm
+    
+    ' Ensure Directory Exists
+    filePath = "C:\Working\"
+    If Dir(filePath, vbDirectory) = "" Then
+        MkDir filePath
+    End If
+    
+    ' Save Excel File
+    nowDate = Format(Now, "m-d-yy_hms")
+    savePath = filePath & "Updated Contacts_" & nowDate & ".xlsx"
+    workbook.SaveAs savePath
+    workbook.Close
+    excelApp.Quit
+    
+    ' Notify User
+    MsgBox "New Contacts are successfully saved!", vbInformation
+    
+    ' Clean Up
+    Set olApp = Nothing
+    Set olNamespace = Nothing
+    Set olInbox = Nothing
+    Set olSent = Nothing
+    Set olCalendar = Nothing
+    Set uniqueEmails = Nothing
+    Set excelApp = Nothing
+    Set workbook = Nothing
+    Set sheet = Nothing
+End Sub
+
+Sub AddUniqueEmail(uniqueEmails As Object, sheet As Object, email As String, col As Integer, ByRef row As Long, domainsArray() As String)
+    If email <> "" And Not uniqueEmails.exists(email) And Not IsDomainExcluded(email, domainsArray) Then
+        uniqueEmails.Add email, True
+        sheet.Cells(row, col).Value = email
+        row = row + 1
+    End If
+End Sub
+
+Sub ExtractRecipients(olMail As Outlook.MailItem, uniqueEmails As Object, sheet As Object, col As Integer, ByRef row As Long, domainsArray() As String)
+    Dim recips As Outlook.Recipients
+    Dim recip As Outlook.Recipient
+    Set recips = olMail.Recipients
+    For Each recip In recips
+        AddUniqueEmail uniqueEmails, sheet, recip.Address, col, row, domainsArray
+    Next recip
+End Sub
+
+Sub ExtractAttendees(olMeeting As Outlook.AppointmentItem, uniqueEmails As Object, sheet As Object, col As Integer, ByRef row As Long, domainsArray() As String)
+    Dim att As Outlook.Recipient
+    For Each att In olMeeting.Recipients
+        If att.MeetingResponseStatus = olResponseAccepted Then
+            AddUniqueEmail uniqueEmails, sheet, att.Address, col, row, domainsArray
+        End If
+    Next att
+End Sub
+
+Function IsDomainExcluded(email As String, domainsArray() As String) As Boolean
+    Dim domain As String
+    Dim i As Integer
+    domain = Right(email, Len(email) - InStrRev(email, "@"))
+    For i = LBound(domainsArray) To UBound(domainsArray)
+        If Trim(domainsArray(i)) <> "" And InStr(1, domain, Trim(domainsArray(i)), vbTextCompare) > 0 Then
+            IsDomainExcluded = True
+            Exit Function
+        End If
+    Next i
+    IsDomainExcluded = False
+End Function
